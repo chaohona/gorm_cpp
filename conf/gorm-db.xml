@@ -1,0 +1,86 @@
+<!--支持的数据类型int8,uint8,int16,int32,int,int64,uint16,uint32,uint64,double,string,blob,char-->
+<!--blob统一对应到mysql的mediumblob，上限为16M-->
+<!--string对应到mysql的varchar字段，后面必须跟size限制-->
+<!--char对应到mysql的char字段，后面必须跟size，最大不能超过255，超过则自动转为varchar类型-->
+<!--
+    对游戏应用来说：char与varchar的主要区别
+	char类型数据中间不能有空格，有空格会被截断。但是char类型检索效率比varchar高
+	char适合用来存储openid，设备号等不带空格，并且有检索需求的字段
+-->
+
+<!--
+每个表都有一个secritylevel属性，可以配置两种属性[normal,high]，默认为normal
+配置为high的数据，会在更新的时候实时写入数据库
+-->
+<!--cache属性为是否需要缓存，默认需要为true-->
+<!--列名中不能带空格-->
+<!--每个表会自动增加一列版本号version字段，类型为uint64-->
+<!--debug版本会自动增加json列，用来存储动态增加的字段-->
+<giant-game version="1">
+    <table name="currency" version="1" splitinfo="roleId" primarykey="roleId">
+        <column name="roleId" type="int64" defaultvalue="0" desc="用户ID" />
+        <column name="snakeId" type="int32" defaultvalue="0" desc="货币Id" />
+        <column name="currency1" type="string" size="1024" desc="货币组1" />
+        <column name="currency2" type="string" size="1024" desc="货币组2" />
+        <column name="currency3" type="string" size="1024" desc="货币组3" />
+        <column name="currency4" type="string" size="1024" desc="货币组4" />
+        <index name="currency_roleId" columns="roleId" unique="true"/>
+    </table>
+    <table name="cycleevent" version="1" splitinfo="roleId">
+        <column name="roleId" type="int64" defaultvalue="0" desc="用户ID" />
+        <column name="events" type="string" size="1024" desc="数据" />
+        <index name="cycleevent_roleId" columns="roleId" unique="true"/>
+    </table>
+	<databases>
+		<!--name为数据库用户名，database为数据库名字 defaultrouter为默认路由数据库-->
+		<db name="lixiang_game" host="192.168.12.42" port="3306" user="root" password="ztgame@123" type="mysql" database="gaopin" defaultroute="true"/>
+		<db name="lixiang_account" host="192.168.12.42" port="3306" user="root" password="ztgame@123" type="mysql" database="gaopin"/>
+	</databases>
+	<routes>
+		<table name="currency" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="cycleevent" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="equip" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="food" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="hero" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="login_log" splittablekey="roleid">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="mail" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="material" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="npc" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="res_log" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="roles" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="role" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="scene" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="skill" splittablekey="id">
+			<db name="lixiang_game" splittablenum="2"/>
+		</table>
+		<table name="user" splittablekey="id">
+			<db name="lixiang_account" splittablenum="2"/>
+		</table>
+	</routes>
+</giant-game>

@@ -1,0 +1,19 @@
+#客户端和服务器建立的连接数,最小为1，最大为1024
+conn-num: 10
+
+# 请求的超时时间，单位毫秒，默认10秒
+request-tt: 10000
+
+#gorm服务器地址列表
+#host: ip
+#port: 端口号
+#region: 可用域（机房）
+#main: 主服务器，当main为ture的时候会优先连接此服务器
+gorm-server-list:
+  - host: 127.0.0.1
+    port: 8806
+    region: nh
+    main: true
+  - host: 127.0.0.1
+    port: 8807
+    regin: wq

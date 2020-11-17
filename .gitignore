@@ -1,0 +1,7 @@
+/conf/gorm-db.sql
+/conf/gorm_pb_proto.proto
+/conf/gorm_pb_tables_inc.proto
+/conf/gorm-db.proto
+/tables
+/lib/linux/gorm/libgorm-tables.a
+/lib/linux/gorm/libgorm-tables.so

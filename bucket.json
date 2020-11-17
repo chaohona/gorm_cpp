@@ -1,0 +1,16 @@
+{
+    "name": "database/gorm",
+    "description": "The gorm manager module.",
+    "keywords": [
+        "gorm",
+        "database"
+    ],
+    "license": "mit",
+    "homepage": "https://git.devcloud.ztgame.com/hongchao/gorm_cpp",
+    "support": {
+        "issues": "https://git.devcloud.ztgame.com/hongchao/gorm_cpp/-/issues",
+        "source": "https://git.devcloud.ztgame.com/hongchao/gorm_cpp"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
