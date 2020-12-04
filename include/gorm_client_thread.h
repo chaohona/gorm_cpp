@@ -5,6 +5,8 @@
 #include "gorm_signal_event.h"
 #include "gorm_client_msg.h"
 #include "gorm_client_event.h"
+#include "gorm_client_conf.h"
+#include "gorm_log.h"
 
 namespace gorm{
 
@@ -26,23 +28,42 @@ public:
     // 工作线程接收到前端请求
     inline int SendRequest(GORM_ClientMsg *request)
     {
-        if (GORM_OK != this->clientList[0].SendRequest(request))
+        int sendRet = this->clientList[request->coid_%this->connNum].SendRequest(request);
+        if (GORM_OK != sendRet)
         {
-            return GORM_ERROR;
+            return sendRet;
         }
-        this->NotifyNewRequest();
+		dataFlag = 1;
+
+		this->NotifyNewRequest();
 
         return GORM_OK;
     }
     // 线程被唤醒的回调函数
     virtual void SignalCB()
     {
-        GORM_ClientEvent &clientEvent = this->clientList[0];
-        clientEvent.m_pEpoll->AddEventWrite(&clientEvent);
+        for (int i=0; i<this->connNum; i++)
+        {
+            GORM_ClientEvent &clientEvent = this->clientList[i];
+            if (clientEvent.dataFlag == 1)
+            {
+                clientEvent.dataFlag = 0;
+                clientEvent.m_pEpoll->AddEventWrite(&clientEvent);
+            }
+        }
     }
     inline int GetResponse(GORM_ClientMsg *&reqMsg)
     {
-        return this->clientList[0].GetResponse(reqMsg);
+        reqMsg = nullptr;
+        responseMsgList.Take(reqMsg);
+
+        return GORM_OK;
+    }
+    inline int GetResponse(GORM_ClientMsg **rspPool, int inLen, int64 &num)
+    {
+        this->responseMsgList.Take(rspPool, inLen, num);
+
+        return GORM_OK;
     }
     inline int GetStartStatus()
     {
@@ -52,13 +73,10 @@ public:
     {
         this->startStatus = status;   
     }
-    inline void LoopCheck()
-    {
-        if (loopIndex % 100 == 0)
-        {
-            this->clientList[0].LoopCheck();
-        }
-    }
+    // 工作线程循环检查
+    void WorkLoopCheck();
+    // 收到服务器要更新重启的命令
+    virtual void BeginToUpgrade();
 private:
     int Init();
     // 发送信号，唤醒发送线程
@@ -66,6 +84,18 @@ private:
     {
         this->signalEvent->Single();
     }
+    // 网络线程循环检查
+    inline void LoopCheck()
+    {
+        if (loopIndex % 20 == 0)
+        {
+            for (int i=0; i<connNum; i++)
+            {
+                this->clientList[i].NetLoopCheck(loopIndex);
+            }
+        }
+    }
+    void ReconnectAllClientWithServer();
 private:
     GORM_ClientEvent                    *clientList = nullptr;
     shared_ptr<GORM_Epoll>              epoll       = nullptr;
@@ -73,6 +103,13 @@ private:
     GORM_Log                            *logHandle  = nullptr;
     atomic<int>                         startStatus;
     uint64                              loopIndex = 0;
+	atomic<int> dataFlag;
+
+	atomic<int> upgradeFlag;
+	uint64      upgradeTime = 0;
+public:
+	GORM_SSQueue<GORM_ClientMsg*, GORM_MAX_MUTEX_SENDING_CHANNEL_BUFF>  responseMsgList;    // 获取到响应之后放入此队列，业务线程从这里获取结果
+    int connNum = GORM_CONN_NUM;
 };
 
 class GORM_ClientThreadPool: public GORM_ThreadPool, 
@@ -90,25 +127,64 @@ public:
     {
         return this->clientThread->GetResponse(reqMsg);
     }
+    inline int GetResponse(GORM_ClientMsg **rspPool, int inLen, int64 &num)
+    {
+        return this->clientThread->GetResponse(rspPool, inLen, num);
+    }
     // 获取和gorm连接的线程启动状态，0为正在建立连接，1为连接成功，2为出现错误
     int ClientThreadStartStatus()
     {
         return this->clientThread->GetStartStatus();
     }
-    void LoopCheck()
+    void WorkLoopCheck()
     {
-        if (this->clientThread == nullptr)
+        // 最多十个循环检查一次
+        ++this->nowLoopIndex;
+        if (this->nowLoopIndex - this->loopCheckIndex < 10)
+        {
             return;
-        this->clientThread->LoopCheck();
+        }
+        uint64 now = GORM_GetNowMS();
+        // 最多500毫秒检查一次
+        if (now - this->lastCheckMS < 500)
+            return;
+        this->lastCheckMS = now;
+        this->loopCheckIndex = this->nowLoopIndex;
+        this->clientThread->WorkLoopCheck();
     }
 public:
     // 发送一个请求
     inline int SendRequest(GORM_ClientMsg *request)
     {
+        auto container_ = gorm::GORM_Wrap::Instance()->GetContainer();
+        if(!container_) 
+        { 
+            return -1; 
+        } 
+        gamesh::coroutine::ICoroutineMgr *comgr = container_->Make<gamesh::coroutine::ICoroutineMgr>().get();
+        gamesh::coroutine::CoroutineBase *curco = nullptr;                                            
+        if (comgr != nullptr)                                                                           
+        {                                                                                               
+            curco = comgr->GetCurrentCoroutine();                                                       
+        }
+        uint64_t cbid = curco->GetInstID(); 
+        if (cbid < 0)                       
+        {
+            GALOG_ERROR("gorm got co id failed.");
+            return -1;                      
+        }                                   
+        request->coid_ = cbid;
+     
+        
         return this->clientThread->SendRequest(request);
     }
+
 private:
     shared_ptr<GORM_ClientThread> clientThread = nullptr;
+
+    uint64  loopCheckIndex = 0;
+    uint64  nowLoopIndex = 0;
+    uint64  lastCheckMS = 0;
 };
 
 }

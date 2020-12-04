@@ -3,6 +3,7 @@
 #include "gorm_singleton.h"
 #include "gorm_sys_inc.h"
 #include "gorm_define.h"
+#include "gamesh/galog/gamesh_log_help.h"
 
 #define LOG_MAX_LEN 1024 /* max length of log message */
 

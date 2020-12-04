@@ -46,10 +46,11 @@ using GORM_Ret=int;
 
 // 下面给客户端使用
 #define     GORM_GET_CMD_SETED              -1001 // get命令重复增加record，get命令只能获取一条信息
-#define     GORM_NO_MORE_SEND_CHANNEL       -1002 // 发送队列被使用完了
+#define     GORM_NO_MORE_SEND_CHANNEL       -1002 // 发送队列被使用完了(1:发送的太频繁，2:网络出问题，队列阻塞)
 #define     GORM_START_CLIENT_THREAD_ERR    -1003 // 启动客户端工作线程错误
 #define     GORM_NO_PRIMARY_KEY             -1004 // 没有设置主键，不能操作数据库
 #define     GORM_NOT_DIRTY_DATA             -1005 // 不是脏数据，不需要更新
+#define     GORM_REQEUST_TT                 -1006 // 请求超时
 
 struct RetStringTable
 {

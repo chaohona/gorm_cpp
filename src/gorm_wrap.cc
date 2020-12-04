@@ -25,7 +25,10 @@ GORM_Wrap::~GORM_Wrap()
 GORM_CUSTOM_LOGD(logHandle, "gorm client init failed...");
 
 // TODO 阻塞，知道工作线程启动起来为止
-int GORM_Wrap::Init(const char *cfgPath, GORM_Log *logHandle)
+
+// zxb 2020-11-10
+// int GORM_Wrap::Init(const char *cfgPath, GORM_Log *logHandle)
+int GORM_Wrap::Init(const char *cfgPath, GORM_Log *logHandle, gamesh::container::Container* container)
 {
     GORM_CUSTOM_LOGI(logHandle, "gorm client init begin...");
     this->msgList = new GORM_ClientMsg[GORM_MAX_CLIENT_REQUEST_POOL];
@@ -57,9 +60,10 @@ int GORM_Wrap::Init(const char *cfgPath, GORM_Log *logHandle)
         return GORM_ERROR;
     }
     // 每隔10毫秒检查一次和客户端连接线程是否已经启动完成，或者和gorm连接失败，最多等待1分钟，没有结果则返回失败
+    int startStatus;
     for(int i=0; i<60*100; i++)
     {
-        int startStatus = GORM_ClientThreadPool::Instance()->ClientThreadStartStatus();
+        startStatus = GORM_ClientThreadPool::Instance()->ClientThreadStartStatus();
         if (GORM_ClientStartStatus_Init == startStatus)
         {
             ThreadSleepMilliSeconds(10);
@@ -69,7 +73,7 @@ int GORM_Wrap::Init(const char *cfgPath, GORM_Log *logHandle)
         {
             GORM_CUSTOM_LOGE(logHandle, "gorm client thread start failed.");
             GORM_INIT_FAILED_LOG();
-            return GORM_ERROR;
+            return GORM_CONN_FAILED;
         }
         else if (GORM_ClientStartStatus_Vesion_Failed == startStatus)
         {
@@ -77,36 +81,89 @@ int GORM_Wrap::Init(const char *cfgPath, GORM_Log *logHandle)
             GORM_INIT_FAILED_LOG();
             return GORM_VERSION_NOT_MATCH;
         }
+        else if (GORM_ClientStartStatus_Success == startStatus)
+        {
+            break;
+        }
+    }
+    if (startStatus != GORM_ClientStartStatus_Success)
+    {
+        return GORM_VERSION_NOT_MATCH;
     }
     GORM_CUSTOM_LOGI(logHandle, "gorm client init success...");
+
+    // zxb 2020-11-10
+    if(container)
+    {
+        container_ = container;
+    }
 	return GORM_OK;
 }
 
 int GORM_Wrap::Stop(bool force)
 {
-    GORM_ClientThreadPool::Instance()->Stop();
 
     return GORM_OK;
 }
 
-int GORM_Wrap::OnUpdate()
+
+int GORM_Wrap::OnUpdate(int procNumMax)
 {
-    GORM_ClientMsg *clientMsg = nullptr;
-    // 每个循环最多处理1000个请求
-    for(int i=0; i<1000; i++)
+    uint64 now = GORM_GetNowMS();
+    if (this->lastUpdateTime == 0)
     {
-        if (GORM_OK != GORM_ClientThreadPool::Instance()->GetResponse(clientMsg))
+        this->lastUpdateTime = now;
+    }
+    else
+    {
+        
+        uint64 newTT = now - this->lastUpdateTime;
+        if (newTT > this->maxTT)
         {
-            return GORM_ERROR;
-            break;
+            this->maxTT = newTT;
+            GALOG_DEBUG("gorm, OnUpdate skip:%llu", newTT);
         }
+        this->lastUpdateTime = now;
+    }
+    GORM_ClientMsg *clientMsg = nullptr;
+
+    for(int i=0; i<procNumMax; i++)
+    {
+        GORM_ClientThreadPool::Instance()->GetResponse(clientMsg);
         if (clientMsg == nullptr)
         {
             break;
         }
-        // 处理回调函数
-        clientMsg->ProcCallBack();      
+        clientMsg->ResumeCo();
+		GALOG_DEBUG("gorm, response reqid:%d, time:%llu", clientMsg->cbId, now-clientMsg->requestTMS);
     }
+
+    return GORM_OK;
+    
+    if (reponseWaitPorcPoolMaxIndex == 0)
+    {
+        GORM_ClientThreadPool::Instance()->GetResponse(reponseWaitPorcPool, GORM_RESPONSE_MSG_POOL, reponseWaitPorcPoolMaxIndex);
+    }
+    // 每个循环最多处理1000个请求
+    for(int i=reponseWaitPorcPoolNowIndex; i<reponseWaitPorcPoolMaxIndex; i++)
+    {
+        ++reponseWaitPorcPoolNowIndex;
+        clientMsg = reponseWaitPorcPool[i];
+        if (clientMsg == nullptr)
+        {
+            continue;
+        }
+
+        // zxb 2020-11-10
+        clientMsg->ResumeCo();
+		GALOG_DEBUG("gorm, response reqid:%d, time:%llu", clientMsg->cbId, now-clientMsg->requestTMS);
+    }
+    if (reponseWaitPorcPoolNowIndex >= reponseWaitPorcPoolMaxIndex)
+    {
+        reponseWaitPorcPoolMaxIndex = 0;
+        reponseWaitPorcPoolNowIndex = 0;
+    }
+        
     return GORM_OK;
 }
 

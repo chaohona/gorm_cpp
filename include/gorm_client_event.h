@@ -9,13 +9,14 @@
 #include "gorm_ss_queue.h"
 #include "gorm_thread_pool.h"
 #include "gorm_table_field_map_define.h"
+#include "gorm_wrap.h"
 
 namespace gorm{
 
 #define GORM_MAX_SENDING_CHANNEL 1024 // 预分配不超过1024个发送队列,一个线程使用一个发送队列
 #define GORM_MAX_SENDING_CHANNEL_BUFF 1024 * 4
 #define GORM_MAX_MUTEX_SENDING_CHANNEL_BUFF 1024 * 128 // 12万，达到redis的QPS
-
+#define GORM_EVENT_SENDING_CHANNEL_BUFF  10240
 
 // 处理GORM客户端和GORM服务器的连接
 /*
@@ -44,27 +45,38 @@ public:
 
     void SetThread(shared_ptr<GORM_Thread>& thread);
 
+    // 优先发送请求
+    inline int PreSendRequest(GORM_ClientMsg *request)
+    {
+        // 如果已经断开连接了，则失败
+        // TODO 如果业务层是单线程，这个锁不需要
+        uint64 now = GORM_GetNowMS();
+        request->requestTMS = now;
+        if (!this->waitSendingChannel.PutPre(request))
+            return GORM_NO_MORE_SEND_CHANNEL;
+
+        this->dataFlag = 1;
+        return GORM_OK;
+    }
+
     // 发送一个请求
     inline int SendRequest(GORM_ClientMsg *request)
     {
+        // 如果已经断开连接了，则失败
         // TODO 如果业务层是单线程，这个锁不需要
-        unique_lock<mutex > lck (request->mtx);
-        if (!this->mutexChannel.Put(request))
-            return GORM_ERROR;
+        uint64 now = GORM_GetNowMS();
+        request->requestTMS = now;
+        if (!this->waitSendingChannel.Put(request))
+            return GORM_NO_MORE_SEND_CHANNEL;
 
+        this->dataFlag = 1;
         return GORM_OK;
     }
-    inline int GetResponse(GORM_ClientMsg *&reqMsg)
-    {
-        reqMsg = nullptr;
-        // TODO 如果业务层是单线程，这个锁不需要
-        unique_lock<mutex> lck(this->mtx);
-        responseMsgList.Take(reqMsg);
-        
-        return GORM_OK;
-    }
-    // TODO 检查超时等
-    void LoopCheck();
+    // 网络线程循环检查
+    void NetLoopCheck(uint64 loopIndex);
+    // 业务线程调用的检查
+    void WorkLoopCheck();
+    virtual int Close();
 public:
     virtual int Write();
     virtual int Read();
@@ -77,10 +89,11 @@ private:
         {
             return GORM_OK;
         }
-        unique_lock<mutex> lck(this->mtx);
-        if (this->mutexChannel.Take(this->sendingRequest) && this->sendingRequest != nullptr)
+        if (this->waitSendingChannel.Take(this->sendingRequest) && this->sendingRequest != nullptr)
         {
             this->sendingPos = this->sendingRequest->reqMemData->m_uszData;
+            if (this->sendingRequest->needCBFlag == GORM_REQUEST_NEED_CB)
+                clientWaitRspMsgMap[this->sendingRequest->cbId] = this->sendingRequest;
             return GORM_OK;
         }
         
@@ -89,8 +102,9 @@ private:
     // 发送完一条消息的后处理
     inline int OneRequestFinishSend()
     {
-        if (this->sendingRequest->needCBFlag == GORM_REQUEST_NEED_CB)
-            clientMsgMap[this->sendingRequest->cbId] = this->sendingRequest;
+        uint64 now = GORM_GetNowMS();
+        GALOG_DEBUG("gorm, sending tt:%llu", now - this->sendingRequest->requestTMS);
+        this->send2ServerNum += 1;
         this->sendingRequest = nullptr;
         
         return GORM_OK;
@@ -101,46 +115,46 @@ private:
     int OneRspFinishRead();
     inline int GetReqMsgForResponse(uint32 cbId, GORM_ClientMsg *&reqMsg)
     {
-        reqMsg = clientMsgMap[cbId];
+        reqMsg = clientWaitRspMsgMap[cbId];
         if (reqMsg != nullptr)
-            this->clientMsgMap.erase(cbId);
+            this->clientWaitRspMsgMap.erase(cbId);
         return GORM_OK;
     }
-    inline int PutResponseToList(uint32 cbId, GORM_ClientMsg *reqMsg)
-    {
-        unique_lock<mutex> lck(this->mtx);
-        responseMsgList.Put(reqMsg);
-        reqMsg->Signal();    // 通知业务线程，有新响应到
-        return GORM_OK;
-    }
+    int PutResponseToList(uint32 cbId, GORM_ClientMsg *reqMsg);
     int SendHandShakeMsg();
     int HandShakeResult(char preErrCode);
-private:
-    mutex           mtx;    // 用于互斥获取发送队列id等操作时使用
-    list<int>       freeChannelId;          // 申请之后释放的发送队列id
+	int Reconnect(const char *szIP, uint16 uiPort);
+	int DoAfterReconnect(); // 重连之后的后处理
+
+	void BeginToUpgrade();
+public:
+    mutex           mtx;                        // 用于互斥获取发送队列id等操作时使用
+    list<int>       freeChannelId;              // 申请之后释放的发送队列id
     atomic<int>     sendChannelUsedIdx;         // 发送队列使用下标
 
     atomic<int>     pendingSendMsgNum;
     atomic<uint32>  cbIdSeedAtomic;
     int64           cbIdSeed = 0;
     
-    // 发送队列,0号队列不分配，预留给没有申请发送队列的线程公用
-    GORM_SSQueue<GORM_ClientMsg*, GORM_MAX_MUTEX_SENDING_CHANNEL_BUFF>  mutexChannel;
+    GORM_SSQueue<GORM_ClientMsg*, GORM_EVENT_SENDING_CHANNEL_BUFF>  waitSendingChannel; // 等待发送的队列
+    uint64              send2ServerNum = 0;
     GORM_ClientMsg      *sendingRequest = nullptr;  // 正在发送的消息
     int                 sendingChanneldId = -1;     // 正在发送的消息所在的channel
     // 发送消息的下标
     char *sendingPos = nullptr;
     ////////////////响应处理相关数据
-    unordered_map<uint32, GORM_ClientMsg*>  clientMsgMap;
-    GORM_SSQueue<GORM_ClientMsg*, GORM_MAX_MUTEX_SENDING_CHANNEL_BUFF>  mutexReadChannel;
-    
-    GORM_SSQueue<GORM_ClientMsg*, GORM_MAX_MUTEX_SENDING_CHANNEL_BUFF>  responseMsgList;
+    unordered_map<uint32, GORM_ClientMsg*>  clientWaitRspMsgMap;                            // 只有发送线程会使用    
     //
     GORM_MemPoolData                *readingBuffer = nullptr;   // 读取GORMSERVER响应缓冲区
     char                            *readPos = nullptr;         // 当前读缓冲区已使用到的位置
     char                            *beginReadPos = nullptr;    // 读缓冲区开始位置
     int                             needReadLen = 0;            // 当前消息需要读取的长度
     shared_ptr<GORM_Thread>         myThread = nullptr;         // 当前工作的线程
+
+    int upgradeFlag = 0;
+    uint64 upgradeMS = 0;
+public:
+    atomic<int> dataFlag;
 };
 
 }

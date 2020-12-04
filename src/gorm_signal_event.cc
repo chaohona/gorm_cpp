@@ -46,14 +46,16 @@ int GORM_SignalEvent::Write()
 
 int GORM_SignalEvent::Read()
 {
-    #define SIGNAL_READ_BUFF_LEN 64
-    char readBuffer[SIGNAL_READ_BUFF_LEN];
-    int iNum;
-    do{
-        iNum = read(this->m_iReadFD, readBuffer, SIGNAL_READ_BUFF_LEN);
-    }while(iNum == SIGNAL_READ_BUFF_LEN);
+    {
+#define SIGNAL_READ_BUFF_LEN 64
+        char readBuffer[SIGNAL_READ_BUFF_LEN];
+        int iNum;
+        do{
+            iNum = read(this->m_iReadFD, readBuffer, SIGNAL_READ_BUFF_LEN);
+        }while(iNum == SIGNAL_READ_BUFF_LEN);
 
-    this->m_iDataFlag = 0;
+        this->m_iDataFlag = 0;
+    }
     if (this->m_pThread != nullptr)
         this->m_pThread.get()->SignalCB();
     

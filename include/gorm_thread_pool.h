@@ -22,6 +22,7 @@ public:
     // 用于在本线程处理io等待阶段(epoll_wait)，别的线程唤醒本线程的时候的回调
     virtual void SignalCB() = 0;
     virtual void Stop();
+    virtual void BeginToUpgrade() = 0;
 public:
     virtual void Join();
     virtual void Detach();

@@ -7,10 +7,13 @@ GORM_ClientThread::GORM_ClientThread(GORM_Log *logHandle, shared_ptr<GORM_Thread
 {
     this->startStatus = GORM_ClientStartStatus_Init;
     this->clientList = new GORM_ClientEvent[GORM_MAX_CONN_NUM];
+	this->dataFlag = 1;
+	this->upgradeFlag = 0;
 }
 
 GORM_ClientThread::~GORM_ClientThread()
 {
+	GALOG_DEBUG("gorm, GORM_ClientThread exit.");
     if (this->clientList != nullptr)
     {
         delete []clientList;
@@ -41,7 +44,7 @@ int GORM_ClientThread::Init()
     // 和服务器建立连接
     GORM_ClientConfig *clientCfg = GORM_ClientConfig::GetSelfSafe();
     GORM_ServerInfo *svrInfo = clientCfg->GetNextServer();
-    clientCfg->connNum = 1; // 目前固定为建立一个连接
+    this->connNum = clientCfg->connNum;
     for (int i=0; i<clientCfg->connNum; i++)
     {
         GORM_ClientEvent &clientEvent = this->clientList[i];
@@ -64,21 +67,63 @@ void GORM_ClientThread::Work(mutex *m)
     if (GORM_OK != this->Init())
     {
         GORM_CUSTOM_LOGE(logHandle, "gorm thread init failed.");
-        this->Stop();
         this->startStatus = GORM_ClientStartStatus_Failed; // 启动失败
         return;
     }
     GORM_CUSTOM_LOGI(logHandle, "gorm thread begin to work.");
     //this->startStatus = GORM_ClientStartStatus_Success;  // 启动成功
     // 创建
-    for(;stopFlag==0;)
+    for(;;)
     {
         loopIndex += 1;
-        this->epoll->EventLoopProcess(10);
+        this->epoll->EventLoopProcess(1);
         this->epoll->ProcAllEvents();
         this->LoopCheck();
+		if (this->dataFlag == 1)
+		{
+			this->dataFlag = 0;
+			this->SignalCB();
+		}
+		// 开始服务器升级流程
+		if (this->upgradeTime != 0)
+		{
+		    uint64 now = GORM_GetNowMS();
+		    if (now - this->upgradeTime > 100)
+		    {
+		        this->ReconnectAllClientWithServer();
+		    }
+		}
     }
     this->Stop();
+}
+
+void GORM_ClientThread::ReconnectAllClientWithServer()
+{
+    GALOG_DEBUG("gorm, begin to reconnecto with server.");
+    for (int i=0; i<this->connNum; i++)
+    {
+        GORM_ClientEvent *event = this->clientList+i;
+        if (event == nullptr)
+            continue;
+        event->Close();
+    }
+    this->upgradeFlag = 0;
+    this->upgradeTime = 0;
+}
+
+void GORM_ClientThread::BeginToUpgrade()
+{
+    if(this->upgradeFlag == 1)
+    {
+        return;
+    }
+    this->upgradeFlag = 1;
+    this->upgradeTime = GORM_GetNowMS();
+}
+
+void GORM_ClientThread::WorkLoopCheck()
+{
+    this->clientList[0].WorkLoopCheck();
 }
 
 GORM_ClientThreadPool::GORM_ClientThreadPool()

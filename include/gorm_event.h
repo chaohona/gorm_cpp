@@ -56,6 +56,8 @@ public:
     void SetLogHandle(GORM_Log *logHandle);
     void SetEpollHandle(shared_ptr<GORM_Epoll>      epollHandle);
 
+    int DelWrite();
+
 #ifndef _WIN32
     int DoSendv(iovec *iov, int iovcnt);
 #endif

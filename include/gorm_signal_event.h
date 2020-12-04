@@ -41,11 +41,13 @@ public:
             return;
         }
         this->m_iDataFlag = 1;
+        int loop = 0;
         do
         {
             iSendNum = write(this->m_iWriteFD, (char*)&cSend, 1);
+            loop += 1;
         }
-        while (iSendNum < 1);
+        while (iSendNum < 1 && loop < 16);
         
     }
 public:

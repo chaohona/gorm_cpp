@@ -25,11 +25,92 @@ void GORM_ClientEvent::Init(GORM_Log *logHandle, shared_ptr<GORM_Epoll> epoll, s
     beginReadPos = readPos;
 }
 
-// 数据读取缓冲区
-// 如果不改变系统参数,默认一次最多只能接收127K，缓冲区设置太大没有意义
-#define GORM_SOCKET_READ_MAX_BUFF 127*1024
-int GORM_ClientEvent::ConnectToServer(const char *szIP, uint16 uiPort)
+int GORM_ClientEvent::Close()
 {
+    uint64 now = GORM_GetNowMS();
+    GORM_ClientMsg *clientMsg = nullptr;
+    auto n = this->clientWaitRspMsgMap.begin();
+    
+    GALOG_DEBUG("gorm, close connection with gorm server, wait for rsp map size is:%d", this->clientWaitRspMsgMap.size());
+    GORM_Event::Close();
+    for (int j=0; j<6000; j++)
+    {
+        for (int i=0; i<1000 * 10; i++)
+        {
+            if (GORM_OK == Reconnect(this->m_szIP, this->m_uiPort))
+            {
+                // 重连之后重发未得到响应的消息
+                this->DoAfterReconnect();
+                return GORM_OK;
+            }
+            GALOG_DEBUG("gorm, reconnect with gorm server, failed, try again...");
+            // 关闭reconnect中的句柄
+            GORM_Event::Close();
+            ThreadSleepMilliSeconds(10);
+        }
+        ThreadSleepSeconds(1);
+        this->NetLoopCheck(0);
+    }
+
+    GALOG_DEBUG("gorm, close connection with gorm server.");
+    return GORM_OK;
+}
+
+bool clientMsgCompare(GORM_ClientMsg* a, GORM_ClientMsg* b)
+{
+    return a->cbId > b->cbId;
+}
+
+int GORM_ClientEvent::DoAfterReconnect()
+{
+    if (this->clientWaitRspMsgMap.size() == 0)
+        return GORM_OK;
+    // 获取clientWaitRspMsgMap最小值
+    GORM_ClientMsg *clientMsg = nullptr;
+    int maxReqId = -1;
+    auto n = this->clientWaitRspMsgMap.begin();
+    uint64 now = GORM_GetNowMS();
+    vector<GORM_ClientMsg*> tmpSortV;
+    int index = 0;
+    while(n != this->clientWaitRspMsgMap.end())
+    {   
+        clientMsg = n->second;
+        ++n;
+        if (clientMsg != nullptr)
+        {   
+            clientMsg->requestTMS = now;
+            tmpSortV.push_back(clientMsg);
+            continue;
+        }
+    }
+    this->clientWaitRspMsgMap.clear();
+    sort(tmpSortV.begin(), tmpSortV.end(), clientMsgCompare);
+    for(int i=0; i<tmpSortV.size(); i++)
+    {
+        if (!this->waitSendingChannel.PutPre(tmpSortV[i]))
+        {
+            GALOG_ERROR("gorm, resend request failed, reqid:%d", clientMsg->cbId);
+            continue;
+        }
+        GALOG_DEBUG("gorm, resend request success, reqid:%d", clientMsg->cbId);
+    }
+
+    if (GORM_OK != this->SendHandShakeMsg())
+    {
+        GORM_CUSTOM_LOGE(logHandle, "send hand shake message failed");
+        return GORM_ERROR;
+    }
+    return GORM_OK;
+}
+
+int GORM_ClientEvent::Reconnect(const char *szIP, uint16 uiPort)
+{
+    readPos = readingBuffer->m_uszData;
+    beginReadPos = readPos;
+    sendingRequest = nullptr;
+    needReadLen = 0;
+    sendingPos = nullptr;
+
     int iFD = socket(AF_INET, SOCK_STREAM, 0);
     if (iFD < 0)
     {
@@ -37,8 +118,6 @@ int GORM_ClientEvent::ConnectToServer(const char *szIP, uint16 uiPort)
         return GORM_ERROR;
     }
     this->m_iFD = iFD;
-    this->m_uiPort = uiPort;
-    strncpy(m_szIP, szIP, NET_IP_STR_LEN);
     sockaddr_in server_address;
 #ifdef _WIN32
     memset(&server_address, 0, sizeof(server_address));
@@ -80,36 +159,33 @@ int GORM_ClientEvent::ConnectToServer(const char *szIP, uint16 uiPort)
         GORM_CUSTOM_LOGE(logHandle, "set socket tcpnodelay failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
         return iRet;
     }
-    iRet = GORM_Socket::SetSndTimeO(iFD, 100);
-    if (iRet != GORM_OK)
-    {
-        GORM_CUSTOM_LOGE(logHandle, "set socket send time out failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
-        return iRet;
-    }
-    iRet = GORM_Socket::SetRcvTimeO(iFD, 100);
-    if (iRet != GORM_OK)
-    {
-        GORM_CUSTOM_LOGE(logHandle, "set socket recv time out failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
-        return iRet;
-    }
-    iRet = GORM_Socket::SetSynCnt(iFD, 2);
-    if (iRet != GORM_OK)
-    {
-        GORM_CUSTOM_LOGE(logHandle, "set socket syn count failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
-        return iRet;
-    }
-    
-    iRet = GORM_Socket::SetRevBuf(iFD, GORM_SOCKET_READ_MAX_BUFF);
-    if (iRet != GORM_OK)
-    {
-        GORM_CUSTOM_LOGE(logHandle, "set socket tcpnodelay failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
-        return iRet;
-    }
     iRet = GORM_Socket::SetTcpKeepAlive(iFD);
     if (iRet != GORM_OK)
     {
         GORM_CUSTOM_LOGE(logHandle, "set socket SetTcpKeepAlive failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
         return iRet;
+    }
+    iRet = GORM_Socket::SetLinger(iFD, 0);
+    if (iRet != GORM_OK)
+    {
+        GORM_CUSTOM_LOGE(logHandle, "set socket SetLinger failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
+        return iRet;
+    }
+
+	this->m_pEpoll->AddEventRW(this);
+    GALOG_DEBUG("gorm, connect with gorm succes.");
+
+    return GORM_OK;
+}
+
+
+int GORM_ClientEvent::ConnectToServer(const char *szIP, uint16 uiPort)
+{
+    this->m_uiPort = uiPort;
+    strncpy(m_szIP, szIP, NET_IP_STR_LEN);
+    if (GORM_OK != this->Reconnect(szIP, uiPort))
+    {
+        return GORM_ERROR;
     }
 
     if (GORM_OK != this->SendHandShakeMsg())
@@ -117,13 +193,58 @@ int GORM_ClientEvent::ConnectToServer(const char *szIP, uint16 uiPort)
         GORM_CUSTOM_LOGE(logHandle, "send hand shake message failed:%s,%d, errno:%d, errmsg:%s", szIP, uiPort, errno, strerror(errno));
         return GORM_ERROR;
     }
-    
+
     return GORM_OK;
 }
 
-void GORM_ClientEvent::LoopCheck()
+void GORM_ClientEvent::NetLoopCheck(uint64 loopIndex)
 {
+    // 超时检查
+    uint64 now = GORM_GetNowMS();
+    GORM_ClientMsg *clientMsg = nullptr;
+    auto n = this->clientWaitRspMsgMap.begin();
     
+    //GALOG_DEBUG("gorm, wait for rsp map size is:%d", this->clientWaitRspMsgMap.size());
+    while(n != this->clientWaitRspMsgMap.end())
+    {   
+        clientMsg = n->second;
+        if (clientMsg == nullptr)
+        {   
+            if (n->first > 1)
+                GALOG_DEBUG("gorm, erase message from wait rsp map, caused by nullptr, reqid:%d", n->first);
+            n = this->clientWaitRspMsgMap.erase(n);
+            continue;
+        }
+        // TODO 超时时间可配，加上统计日志
+        else if (now - clientMsg->requestTMS > 3000)
+        {
+            GALOG_DEBUG("gorm, erase message from wait rsp map, caused by tt, reqid:%d", n->first);
+            n = this->clientWaitRspMsgMap.erase(n);
+            clientMsg->rspCode.code = GORM_REQEUST_TT;
+            this->PutResponseToList(clientMsg->cbId, clientMsg);
+            continue;
+        }
+        else
+            ++n;
+   }
+}
+
+int GORM_ClientEvent::PutResponseToList(uint32 cbId, GORM_ClientMsg *reqMsg)
+{
+    GORM_ClientThread *clientThread = dynamic_cast<GORM_ClientThread*>(this->myThread.get());
+    int64 nowNum = 0;
+
+    clientThread->responseMsgList.Put(reqMsg, nowNum);
+    if (nowNum > 10)
+        GALOG_DEBUG("gorm, response list is:%lld", nowNum);
+    uint64 now = GORM_GetNowMS();
+    GALOG_DEBUG("gorm, response network, reqid:%d, time:%llu", reqMsg->cbId, now-reqMsg->requestTMS);
+    return GORM_OK;
+}
+
+void GORM_ClientEvent::WorkLoopCheck()
+{
+
 }
 
 void GORM_ClientEvent::SetThread(shared_ptr<GORM_Thread> &thread)
@@ -153,7 +274,6 @@ int GORM_ClientEvent::Write()
         // TODO 断线重连流程
         if (iWriteLen < 0)
         {
-            this->Close();
             return GORM_ERROR;
         }
         needSendLen -= iWriteLen;
@@ -162,13 +282,15 @@ int GORM_ClientEvent::Write()
         if (needSendLen == 0)
         {
             this->OneRequestFinishSend();
-            continue;
+            break;
         }
         break;
     }
     return GORM_OK;
 }
 
+
+#define GORM_SOCKET_READ_MAX_BUFF 1024*127
 // TODO 和gorm server 断线之后将本地等待响应的消息返回给上层
 int GORM_ClientEvent::Read()
 {
@@ -180,14 +302,11 @@ int GORM_ClientEvent::Read()
     bool bCouldContinue = true;
     do
     {
-#ifdef _WIN32
         iNowReadLen = recv(m_iFD, readPos, readingBuffer->m_uszEnd-readPos, 0);
-#else
-        iNowReadLen = read(m_iFD, readPos, readingBuffer->m_uszEnd-readPos);
-#endif
         if (iNowReadLen == 0)
         {
             GORM_CUSTOM_LOGE(logHandle, "read from server failed");
+            this->Close();
             return GORM_ERROR;
         }
         if (iNowReadLen < 0)
@@ -217,7 +336,6 @@ int GORM_ClientEvent::Read()
             {
                 if (GORM_OK != this->BeginReadNextMsg())
                 {
-                    this->Close();
                     GORM_CUSTOM_LOGE(logHandle, "parse rsp message failed, close connect with gorm server.");
                     return GORM_ERROR;
                 }
@@ -227,7 +345,6 @@ int GORM_ClientEvent::Read()
             {
                 if (GORM_OK != OneRspFinishRead())
                 {
-                    this->Close();
                     GORM_CUSTOM_LOGE(logHandle, "parse rsp message failed, close connect with gorm server.");
                     return GORM_ERROR;
                 }
@@ -256,7 +373,6 @@ int GORM_ClientEvent::BeginReadNextMsg()
         needReadLen = GORM_GetMsgLen(beginReadPos);
         if (needReadLen > GORM_MAX_REQUEST_LEN)
         {
-            this->Close();
             GORM_CUSTOM_LOGE(logHandle, "response is too large.");
             return GORM_ERROR;
         }
@@ -305,9 +421,16 @@ int GORM_ClientEvent::OneRspFinishRead()
     // 请求超时，本地数据已经被删除了，或者不关心响应
     if (rspMsg == nullptr)
     {
+        //GALOG_DEBUG("gorm, can not got request info for msg, reqid:%d", cbID);
         if(reqCmd == 2)
         {
             return HandShakeResult(preErrCode);
+        }
+        // 服务器将要升级
+        if (reqCmd == 1001)
+        {
+            this->BeginToUpgrade();
+            return GORM_OK;
         }
         if (needReadLen <= GORM_RSP_MSG_HEADER_LEN)
         {
@@ -321,7 +444,7 @@ int GORM_ClientEvent::OneRspFinishRead()
         }
         return GORM_OK;
     }
-    unique_lock<mutex> lck(rspMsg->mtx);
+
     // 如果有错误则直接返回
     if (preErrCode != GORM_OK)
     {
@@ -350,7 +473,7 @@ int GORM_ClientEvent::SendHandShakeMsg()
         GORM_CUSTOM_LOGE(logHandle, "begin to send hand shake message, pack message failed.");
         return GORM_ERROR;
     }
-    this->SendRequest(handShakeMsg);
+    this->PreSendRequest(handShakeMsg);
     
     this->m_pEpoll->AddEventWrite(this);
     return GORM_OK;
@@ -360,10 +483,8 @@ int GORM_ClientEvent::HandShakeResult(char preErrCode)
 {
     auto workThread = dynamic_cast<GORM_ClientThread*>(this->myThread.get());
     if (workThread == nullptr){
-	cout << "workThread == nullptr" << endl;
         return GORM_ERROR;
     }
-    cout << "preErrCode:" << preErrCode << endl;
     if (preErrCode == GORM_OK)
     {
         workThread->SetStartStatus(GORM_ClientStartStatus_Success);
@@ -374,6 +495,16 @@ int GORM_ClientEvent::HandShakeResult(char preErrCode)
     }
     
     return GORM_OK;
+}
+
+void GORM_ClientEvent::BeginToUpgrade()
+{
+    GALOG_INFO("gorm, get server upgrade cmd.");
+    this->upgradeFlag = 1;
+    this->upgradeMS = GORM_GetNowMS();
+    // 开始不发送消息了
+    this->DelWrite();
+    this->myThread->BeginToUpgrade();
 }
 
 

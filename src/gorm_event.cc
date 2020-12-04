@@ -54,6 +54,7 @@ int GORM_Event::Error()
 
 int GORM_Event::Close()
 {
+	GALOG_DEBUG("gorm, close connect with gorm.");
     try
     {
         this->m_Status = GORM_CONNECT_CLOSED;
@@ -71,7 +72,6 @@ int GORM_Event::Close()
             GORM_CUSTOM_LOGD(logHandle, "event close %d %s:%d", this->m_iFD, this->m_szIP, this->m_uiPort);
             this->m_iFD = 0;
         }
-        this->m_pEpoll = nullptr;
     }
     catch(exception &e)
     {
@@ -159,6 +159,12 @@ void GORM_Event::SetRemoveAddr()
     m_szPerrAddr[iLen] = '\0';
 #endif
 }
+
+int GORM_Event::DelWrite()
+{
+    return this->m_pEpoll->DelEventWrite(this);    
+}
+
 
 GORM_Epoll::GORM_Epoll()
 {
